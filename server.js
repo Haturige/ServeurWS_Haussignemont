@@ -24,7 +24,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 const players = new Map();
-// id -> { ws, name, color, x, y, z, ry, room }
+// id -> { ws, name, color, x, y, z, ry, room, clientId }
 
 let nextId = 1;
 
@@ -59,7 +59,8 @@ wss.on("connection", (ws, request) => {
     z: 0,
     ry: 0,
     room: null,
-    eyeHeight: 1.7
+    eyeHeight: 1.7,
+    clientId: null,
   });
 
   log(
@@ -103,6 +104,42 @@ wss.on("connection", (ws, request) => {
     // -------------------------
 
     if (msg.type === "join") {
+      // Identifiant persistant côté navigateur (un par onglet, voir le
+      // client). S'il correspond à une AUTRE connexion déjà active, c'est
+      // très probablement le même onglet qui se reconnecte après une
+      // connexion "zombie" (AFK, mise en veille, coupure réseau...) — on
+      // ferme l'ancienne immédiatement plutôt que d'attendre que le
+      // ping/pong la détecte comme morte (ce qui pouvait prendre jusqu'à
+      // 15-30 secondes et laissait un doublon visible entre-temps).
+      const incomingClientId =
+        typeof msg.clientId === "string" && msg.clientId
+          ? msg.clientId.slice(0, 64)
+          : null;
+
+      if (incomingClientId) {
+        players.forEach((otherPlayer, otherId) => {
+          if (otherId === id) return;
+          if (otherPlayer.clientId !== incomingClientId) return;
+
+          log(
+            `🧹 Doublon détecté (même clientId) : fermeture immédiate de l'ancienne connexion ID=${otherId} au profit de ID=${id}`
+          );
+
+          try {
+            otherPlayer.ws.terminate();
+          } catch (error) {
+            log(`⚠️ Erreur en fermant l'ancienne connexion ID=${otherId} :`, error.message);
+          }
+
+          // Supprimé tout de suite (au lieu d'attendre l'event "close" async
+          // de cette socket) pour qu'aucun broadcast intermédiaire ne le
+          // renvoie encore aux autres clients.
+          players.delete(otherId);
+        });
+      }
+
+      player.clientId = incomingClientId;
+
       const oldName = player.name;
 
       player.name = String(msg.name || "Invité").slice(0, 24);
